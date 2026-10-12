@@ -1,0 +1,28 @@
+version: 1
+black_scene: Black
+cues:
+  - id: scene_19_bathhouse
+    label: The Bathhouse
+    voice: [bathhouse, bath house, the tub]
+    hotkey: Ctrl+Alt+9
+    actions:
+      - {type: scene, name: Bathhouse}
+      - {type: playlist, name: Satie}
+    manual_fallback: Scenes > Bathhouse > Activate
+  - id: kill_audio
+    label: Kill all audio
+    voice: [kill audio, silence]
+    hotkey: Ctrl+Alt+0
+    actions:
+      - {type: stop_all}
+    manual_fallback: Playlists > Stop all playing playlists
+handouts:
+  - id: harding_portrait
+    voice: [harding, sergeant portrait]
+    src: worlds/whispering-crash/handouts/harding.webp
+state:
+  war_within: 3
+  integrity_lost: 0
+  il_multiplier: 8
+  castor_turned: 0
+named_rolls: []
