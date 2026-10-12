@@ -19,7 +19,7 @@ npm ci
 npm run check
 ```
 
-`npm test` runs 31 pure, mocked Claude HTTP, and mocked Foundry adapter tests. `npm run build` bundles scripts and creates `dist/`, including the manifest and static pages. Build again after source changes. Live Foundry testing is separate; passing unit tests does not establish Foundry compatibility.
+`npm test` runs 34 pure, mocked Claude HTTP, and mocked Foundry adapter tests. `npm run build` bundles scripts and creates `dist/`, including the manifest and static pages. Build again after source changes. Live Foundry testing is separate; passing unit tests does not establish Foundry compatibility.
 
 ## Chrome setup
 
@@ -33,7 +33,7 @@ npm run check
 
 All cues, handouts and named rolls have panel buttons. Tracked state has editable numeric fields. A dice expression field and question field provide typed fallbacks. Cue-defined hotkeys work only in the focused Foundry page and are ignored while typing in an editable field. Manual Foundry instructions can be included in each cue's `manual_fallback` field.
 
-Fixed commands are routed before lookups, including recognition alternatives. Invalid explicit rolls are rejected. Ambiguous/unmatched cue speech never fires a cue; unmatched speech uses the top recognition alternative for the digest lookup. Lookups require an API key, digest, internet access, and an Anthropic account. Speech recognition uses Chrome's Web Speech service and may require internet access. No credentials are needed for building or unit testing.
+Fixed commands are routed before lookups, including recognition alternatives. Hotkey cues, manual cues, and fixed voice commands run immediately outside the worker configuration queue. Claude lookups run separately; a newer lookup aborts the previous request and discards its response. Hold-to-talk uses continuous recognition across pauses and finalizes on key-up. Invalid explicit rolls are rejected. Ambiguous/unmatched cue speech never fires a cue; unmatched speech uses the top recognition alternative for the digest lookup. Lookups require an API key, digest, internet access, and an Anthropic account. Speech recognition uses Chrome's Web Speech service and may require internet access. No credentials are needed for building or unit testing.
 
 ## Real Forge acceptance checklist — NOT RUN
 

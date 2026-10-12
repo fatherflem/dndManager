@@ -7,7 +7,7 @@ export function createSpeech({getOptions,emit,speak,allowed}){
   function start(toggle=false){
     if(active||!allowed())return;
     const Recognition=globalThis.webkitSpeechRecognition;if(!Recognition){emit({type:'status',status:'error',mic:false,error:'Chrome speech recognition is unavailable.'});speak('Mic unavailable.');return;}
-    recognition=new Recognition();recognition.lang=getOptions().lang??'en-US';recognition.interimResults=true;recognition.maxAlternatives=5;recognition.continuous=toggle;
+    recognition=new Recognition();recognition.lang=getOptions().lang??'en-US';recognition.interimResults=true;recognition.maxAlternatives=5;recognition.continuous=true;
     alternatives=[];aborted=false;active=true;toggleMode=toggle;emitted=false;
     recognition.onresult=event=>{
       const results=Array.from(event.results);emit({type:'live',text:results.map(r=>r[0].transcript).join(' ')});

@@ -7,12 +7,26 @@ const trustedUI=sender=>!sender.tab&&sender.id===chrome.runtime.id&&[chrome.runt
 const trustedOptions=sender=>trustedUI(sender)&&sender.url===chrome.runtime.getURL('options/index.html');
 async function page(tabId,payload){if(!Number.isInteger(tabId))throw new Error('No GM Foundry tab connected.');await chrome.tabs.sendMessage(tabId,{target:'page',...payload});}
 async function updateView(patch){const data=await load();await save({view:{...data.view,...patch}});}
+let pendingLookup;
+async function runLookup(question,data,onResult,onError){
+  pendingLookup?.controller.abort();
+  const job={controller:new AbortController()};pendingLookup=job;
+  try{
+    const result=await lookup(question,data,fetch,{signal:job.controller.signal});
+    if(pendingLookup!==job)return;
+    return onResult?await onResult(result):result;
+  }catch(error){
+    if(pendingLookup!==job)return;
+    if(onError)return await onError(error);
+    throw error;
+  }finally{if(pendingLookup===job)pendingLookup=undefined;}
+}
 async function execute(command,data){
   const tabId=data.view.tabId;
   if(command.type==='set'){await save({state:{...data.state,[command.key]:command.value}});await page(tabId,{type:'speak',text:`${command.key.replaceAll('_',' ')} ${command.value}.`});await updateView({did:`Set ${command.key} to ${command.value}`});return;}
   if(command.type==='lookup'){
     await updateView({status:'lookup',heard:command.question,did:'No cue matched.'});
-    try{const result=await lookup(command.question,data);await save({history:result.history,lastSpoken:result.spoken});await updateView({status:'idle',lookup:{question:command.question,answer:result.answer}});await page(tabId,{type:'speak',text:result.spoken});}catch(error){const text=error.name==='TimeoutError'?'Lookup timed out.':'Couldn’t look that up.';await updateView({status:'error',did:error.message});await page(tabId,{type:'speak',text});}return;
+    await runLookup(command.question,data,async result=>{await save({history:result.history,lastSpoken:result.spoken});await updateView({status:'idle',lookup:{question:command.question,answer:result.answer}});await page(tabId,{type:'speak',text:result.spoken});},async error=>{const text=error.name==='TimeoutError'?'Lookup timed out.':'Couldn’t look that up.';await updateView({status:'error',did:error.message});await page(tabId,{type:'speak',text});});return;
   }
   if(command.type==='repeat'){await page(tabId,{type:'speak',text:data.lastSpoken??'Nothing to repeat.'});return;}
   if(command.type==='invalid_roll'){await page(tabId,{type:'speak',text:'Not a roll.'});await updateView({did:'Not a roll.'});return;}
@@ -66,13 +80,14 @@ async function handle(msg,sender){
     if(options.extraOrigins.length)await chrome.scripting.registerContentScripts([{id:'extra-main',matches:options.extraOrigins.map(o=>`${o}/*`),js:['main-world/index.js'],world:'MAIN',runAt:'document_idle'},{id:'extra-bridge',matches:options.extraOrigins.map(o=>`${o}/*`),js:['content/bridge.js'],runAt:'document_idle'}]);
     if(data.view.tabId)await page(data.view.tabId,{type:'configure',options,sheet:data.sheet});return{ok:true};
   }
-  if(msg.type==='testLookup'){const result=await lookup('What rules does this digest cover?',data);return{answer:result.answer};}
+  if(msg.type==='testLookup'){const result=await runLookup('What rules does this digest cover?',data);return result?{answer:result.answer}:{answer:'Lookup superseded.'};}
   if(msg.type==='testVoice'){await page(data.view.tabId,{type:'speak',text:'Stagehand ready.'});return{ok:true};}
 }
 let queue=Promise.resolve();
 chrome.runtime.onMessage.addListener((msg,sender,respond)=>{
-  // Heartbeats and manual Panic must not wait behind a slow rules lookup.
-  const immediate=msg.type==='ping'||(msg.type==='manual'&&msg.command==='panic');
+  // Routing and all lookups run outside the configuration queue. Authentication
+  // and fixed-command parsing still happen in handle before any action is sent.
+  const immediate=['ping','transcript','manual','set','testLookup'].includes(msg.type);
   const operation=immediate?handle(msg,sender):queue.then(()=>handle(msg,sender));if(!immediate)queue=operation.catch(()=>{});
   operation.then(result=>respond({ok:true,data:result})).catch(async error=>{await updateView({status:'error',did:error.message});respond({ok:false,error:error.message});});return true;
 });
