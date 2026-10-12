@@ -1,4 +1,4 @@
-import {load,save,publicData} from './storage.js';
+import {load,save,mutate,publicData} from './storage.js';
 import {lookup} from './claude.js';
 import {routeAlternatives} from '../shared/grammar.js';
 import {substitute,bandFor} from '../shared/dice.js';
@@ -6,7 +6,7 @@ import {parseSheet} from '../shared/cuesheet.js';
 const trustedUI=sender=>!sender.tab&&sender.id===chrome.runtime.id&&[chrome.runtime.getURL('panel/index.html'),chrome.runtime.getURL('options/index.html')].includes(sender.url);
 const trustedOptions=sender=>trustedUI(sender)&&sender.url===chrome.runtime.getURL('options/index.html');
 async function page(tabId,payload){if(!Number.isInteger(tabId))throw new Error('No GM Foundry tab connected.');await chrome.tabs.sendMessage(tabId,{target:'page',...payload});}
-async function updateView(patch){const data=await load();await save({view:{...data.view,...patch}});}
+async function updateView(patch){await save({view:patch});}
 let pendingLookup;
 async function runLookup(question,data,onResult,onError){
   pendingLookup?.controller.abort();
@@ -23,7 +23,7 @@ async function runLookup(question,data,onResult,onError){
 }
 async function execute(command,data){
   const tabId=data.view.tabId;
-  if(command.type==='set'){await save({state:{...data.state,[command.key]:command.value}});await page(tabId,{type:'speak',text:`${command.key.replaceAll('_',' ')} ${command.value}.`});await updateView({did:`Set ${command.key} to ${command.value}`});return;}
+  if(command.type==='set'){await mutate(current=>{if(!(command.key in (current.sheet.state??{}))||!Number.isFinite(command.value))throw new Error('Invalid state.');return{patch:{state:{...current.state,[command.key]:command.value}}};});await page(tabId,{type:'speak',text:`${command.key.replaceAll('_',' ')} ${command.value}.`});await updateView({did:`Set ${command.key} to ${command.value}`});return;}
   if(command.type==='lookup'){
     await updateView({status:'lookup',heard:command.question,did:'No cue matched.'});
     await runLookup(command.question,data,async result=>{await save({history:result.history,lastSpoken:result.spoken});await updateView({status:'idle',lookup:{question:command.question,answer:result.answer}});await page(tabId,{type:'speak',text:result.spoken});},async error=>{const text=error.name==='TimeoutError'?'Lookup timed out.':'Couldn’t look that up.';await updateView({status:'error',did:error.message});await page(tabId,{type:'speak',text});});return;
@@ -31,16 +31,25 @@ async function execute(command,data){
   if(command.type==='repeat'){await page(tabId,{type:'speak',text:data.lastSpoken??'Nothing to repeat.'});return;}
   if(command.type==='invalid_roll'){await page(tabId,{type:'speak',text:'Not a roll.'});await updateView({did:'Not a roll.'});return;}
   if(command.type==='next'||command.type==='previous'){
-    const cues=data.sheet.cues.filter(c=>c.actions.some(a=>a.type==='scene')),index=cues.findIndex(c=>c.id===data.view.currentCue);
-    const cue=cues[command.type==='next'?index+1:index-1];if(!cue){await page(tabId,{type:'speak',text:'No more scenes.'});return;}command={type:'cue',cue};
+    const cue=await mutate(current=>{
+      const cues=current.sheet.cues.filter(c=>c.actions.some(a=>a.type==='scene'));
+      const index=cues.findIndex(c=>c.id===(current.view.navigationCue??current.view.currentCue));
+      const next=cues[command.type==='next'?index+1:index-1];
+      return{patch:next?{view:{...current.view,navigationCue:next.id}}:undefined,result:next};
+    });
+    if(!cue){await page(tabId,{type:'speak',text:'No more scenes.'});return;}command={type:'cue',cue,reserved:true};
   }
   if(command.type==='named_roll'){const r=command.roll;command={type:'roll',formula:substitute(r.formula,{...data.sheet.state,...data.state}),named:{speak:r.speak,bands:r.bands},label:r.id};}
   if(command.type==='panic')command={type:'actions',actions:[{type:'stop_all'},{type:'scene',name:data.sheet.black_scene}],label:'Panic',urgent:true};
   if(command.type==='stop_all')command={type:'actions',actions:[{type:'stop_all'}],label:'Audio killed'};
   if(command.type==='handout')command={type:'actions',actions:[{type:'handout',...command.handout}],label:command.handout.id};
-  if(command.type==='cue')command={type:'actions',actions:command.cue.actions,label:command.cue.label??command.cue.id,cueId:command.cue.id};
-  await page(tabId,{type:'execute',command});
+  if(command.type==='cue'){
+    if(!command.reserved)await updateView({navigationCue:command.cue.id});
+    command={type:'actions',actions:command.cue.actions,label:command.cue.label??command.cue.id,cueId:command.cue.id};
+  }
+  try{await page(tabId,{type:'execute',command});}catch(error){await rollbackCue(command.cueId);throw error;}
 }
+async function rollbackCue(cueId){if(cueId)await mutate(data=>({patch:data.view.navigationCue===cueId?{view:{...data.view,navigationCue:data.view.currentCue??null}}:undefined}));}
 async function handle(msg,sender){
   const data=await load();
   if(sender.tab){
@@ -51,8 +60,9 @@ async function handle(msg,sender){
     if(msg.type==='ping')return{type:'heartbeat'};
     if(msg.type==='transcript'){if(msg.cueId){const cue=data.sheet.cues.find(c=>c.id===msg.cueId);if(cue)await execute({type:'cue',cue},data);}else{await updateView({heard:msg.alternatives?.[0]??''});await execute(routeAlternatives(msg.alternatives??[],data.sheet,data.options.threshold),await load());}}
     if(msg.type==='live')await updateView({heard:msg.text});
-    if(msg.type==='status')await updateView({status:msg.status,mic:msg.mic,did:msg.error??data.view.did,...(msg.connected===false?{connected:false}:{}),...(Array.isArray(msg.sceneErrors)?{sceneErrors:msg.sceneErrors}:{})});
+    if(msg.type==='status')await updateView({status:msg.status,...(msg.mic!==undefined?{mic:msg.mic}:{}),...(msg.error?{did:msg.error}:{}),...(msg.connected===false?{connected:false}:{}),...(Array.isArray(msg.sceneErrors)?{sceneErrors:msg.sceneErrors}:{})});
     if(msg.type==='result'){
+      if(msg.error)await rollbackCue(msg.cueId);
       let spoken=msg.spoken??'Done.';
       if(msg.named&&Number.isFinite(msg.total))spoken=(msg.named.speak??'Rolled {total}.').replaceAll('{total}',String(msg.total)).replaceAll('{band}',bandFor(msg.total,msg.named.bands));
       await save({lastSpoken:spoken});await updateView({status:msg.error?'error':'idle',did:msg.error??msg.detail??spoken,...(msg.cueId&&!msg.error?{currentCue:msg.cueId}:{})});await page(sender.tab.id,{type:'speak',text:msg.error?"Couldn't do that.":spoken});
@@ -71,7 +81,7 @@ async function handle(msg,sender){
   }
   if(msg.type==='set'){if(!(msg.key in (data.sheet.state??{}))||!Number.isFinite(msg.value))throw new Error('Invalid state.');await execute({type:'set',key:msg.key,value:msg.value},data);return;}
   if(!trustedOptions(sender))throw new Error('Options page required.');
-  if(msg.type==='sheet'){const sheet=parseSheet(msg.text);await save({sheet,state:{...sheet.state},view:{...data.view,currentCue:null}});if(data.view.tabId)await page(data.view.tabId,{type:'configure',options:data.options,sheet});return{ok:true};}
+  if(msg.type==='sheet'){const sheet=parseSheet(msg.text);await mutate(current=>({patch:{sheet,state:{...sheet.state},view:{...current.view,currentCue:null,navigationCue:null}}}));if(data.view.tabId)await page(data.view.tabId,{type:'configure',options:data.options,sheet});return{ok:true};}
   if(msg.type==='digest'){await save({digest:msg.text});return{ok:true};}
   if(msg.type==='options'){
     const options={...data.options,...msg.options};if(!Number.isFinite(options.threshold)||options.threshold<0||options.threshold>1||!Number.isFinite(options.rate)||options.rate<.1||options.rate>10)throw new Error('Invalid threshold or voice rate.');
@@ -92,6 +102,6 @@ chrome.runtime.onMessage.addListener((msg,sender,respond)=>{
   operation.then(result=>respond({ok:true,data:result})).catch(async error=>{await updateView({status:'error',did:error.message});respond({ok:false,error:error.message});});return true;
 });
 chrome.commands.onCommand.addListener(async command=>{if(command==='toggle-talk'){try{const data=await load();await page(data.view.tabId,{type:'toggle'});}catch(error){await updateView({status:'error',did:error.message});}}});
-chrome.tabs.onRemoved.addListener(async tabId=>{const data=await load();if(data.view.tabId===tabId)await updateView({connected:false,tabId:null,mic:false});});
+chrome.tabs.onRemoved.addListener(async tabId=>{await mutate(data=>({patch:data.view.tabId===tabId?{view:{...data.view,connected:false,tabId:null,mic:false}}:undefined}));});
 chrome.sidePanel.setPanelBehavior({openPanelOnActionClick:true}).catch(()=>{});
 chrome.storage.local.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'}).catch(()=>{});

@@ -46,3 +46,37 @@ test('only the latest lookup can save or speak a response',{timeout:2000},async(
     assert.deepEqual(f.sent.filter(m=>m.type==='speak').map(m=>m.text),['New answer.']);
   }finally{for(let i=0;i<f.requests.length;i++)f.answer(i,'Cleanup. [Rules]');f.restore();}
 });
+test('two rapid next scene commands reserve and advance two distinct cues',{timeout:2000},async()=>{
+  const f=await fixture();
+  try{
+    f.data.sheet.cues.push({id:'audio',voice:['audio'],actions:[{type:'stop_all'}]},...['second','third'].map(id=>({id,label:id,voice:[id],actions:[{type:'scene',name:id}]})));
+    f.data.view.currentCue='bath';
+    // Do not deliver either page result until both commands have been issued.
+    const responses=await Promise.all([
+      f.send({type:'transcript',alternatives:['next scene']}),
+      f.send({type:'transcript',alternatives:['next scene']})
+    ]);
+    assert.ok(responses.every(r=>r.ok));
+    assert.deepEqual(f.sent.filter(m=>m.type==='execute').map(m=>m.command.cueId),['second','third']);
+    assert.equal(f.data.view.currentCue,'bath');assert.equal(f.data.view.navigationCue,'third');
+    await f.send({type:'result',cueId:'second',spoken:'Second.'});
+    await f.send({type:'result',cueId:'third',spoken:'Third.'});
+    assert.equal(f.data.view.currentCue,'third');
+  }finally{f.restore();}
+});
+test('concurrent handlers preserve independent state and view patches',{timeout:2000},async()=>{
+  const f=await fixture();
+  try{
+    f.data.sheet.state={first:0,second:0};f.data.state={first:0,second:0};
+    const responses=await Promise.all([
+      f.send({type:'set',key:'first',value:1},f.panel),
+      f.send({type:'set',key:'second',value:2},f.panel),
+      f.send({type:'live',text:'live transcript'}),
+      f.send({type:'status',status:'listening',mic:true})
+    ]);
+    assert.ok(responses.every(r=>r.ok));
+    assert.deepEqual(f.data.state,{first:1,second:2});
+    assert.equal(f.data.view.heard,'live transcript');assert.equal(f.data.view.mic,true);
+    assert.equal(f.data.view.connected,true);assert.equal(f.data.view.tabId,7);
+  }finally{f.restore();}
+});

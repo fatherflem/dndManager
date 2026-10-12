@@ -35,7 +35,7 @@ if(!window.__stagehandInstalled){
           for(const action of command.actions??[]){try{const result=await withTimeout(adapter.runAction(action,{signal}),action.type==='wait'?action.ms+1000:8000);already=result?.already||already;if(result?.warning)warnings.push(result.warning);}catch(error){if(!command.urgent)throw error;errors.push(error.message);}}
           emit({type:'result',cueId:command.cueId,spoken:already?'Already there.':command.label,detail:[command.label,...warnings].join('\n'),...(errors.length?{error:errors.join('\n')}:{})});
         }
-      }catch(error){if(!signal.aborted)emit({type:'result',error:error.message});}
+      }catch(error){if(!signal.aborted)emit({type:'result',cueId:command.cueId,error:error.message});}
       });
     }
   });
