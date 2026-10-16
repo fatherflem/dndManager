@@ -3,7 +3,7 @@ import {lookup} from './claude.js';
 import {routeAlternatives} from '../shared/grammar.js';
 import {substitute,bandFor} from '../shared/dice.js';
 import {parseSheet} from '../shared/cuesheet.js';
-const trustedUI=sender=>!sender.tab&&sender.id===chrome.runtime.id&&[chrome.runtime.getURL('panel/index.html'),chrome.runtime.getURL('options/index.html')].includes(sender.url);
+const trustedUI=sender=>sender.id===chrome.runtime.id&&[chrome.runtime.getURL('panel/index.html'),chrome.runtime.getURL('options/index.html')].includes(sender.url);
 const trustedOptions=sender=>trustedUI(sender)&&sender.url===chrome.runtime.getURL('options/index.html');
 async function page(tabId,payload){if(!Number.isInteger(tabId))throw new Error('No GM Foundry tab connected.');await chrome.tabs.sendMessage(tabId,{target:'page',...payload});}
 async function updateView(patch){await save({view:patch});}
@@ -52,7 +52,7 @@ async function execute(command,data){
 async function rollbackCue(cueId){if(cueId)await mutate(data=>({patch:data.view.navigationCue===cueId?{view:{...data.view,navigationCue:data.view.currentCue??null}}:undefined}));}
 async function handle(msg,sender){
   const data=await load();
-  if(sender.tab){
+  if(sender.tab&&!String(sender.url).startsWith(chrome.runtime.getURL(''))){
     let origin;try{origin=new URL(sender.url).origin;}catch{return;}
     if(sender.id!==chrome.runtime.id||!(new URL(origin).hostname.endsWith('.forge-vtt.com')||data.options.extraOrigins.includes(origin)))return;
     if(msg.type==='ready'){if(!msg.isGM)return;await updateView({connected:true,tabId:sender.tab.id,status:'idle',adapter:msg.adapter,sceneErrors:msg.sceneErrors??[]});return{type:'configure',options:data.options,sheet:data.sheet};}

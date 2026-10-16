@@ -1,16 +1,60 @@
 {
-  "manifest_version":3,"name":"Stagehand","version":"0.1.0","minimum_chrome_version":"120",
-  "description":"Voice and manual cues for a Foundry game master.",
-  "permissions":["storage","sidePanel","scripting"],
-  "host_permissions":["https://*.forge-vtt.com/*","https://api.anthropic.com/*"],
-  "optional_host_permissions":["http://*/*","https://*/*"],
-  "background":{"service_worker":"worker/index.js"},
-  "content_scripts":[
-    {"matches":["https://*.forge-vtt.com/*"],"js":["main-world/index.js"],"world":"MAIN","run_at":"document_idle"},
-    {"matches":["https://*.forge-vtt.com/*"],"js":["content/bridge.js"],"run_at":"document_idle"}
+  "manifest_version": 3,
+  "name": "Stagehand",
+  "version": "0.1.1",
+  "minimum_chrome_version": "120",
+  "description": "Voice and manual cues for a Foundry game master.",
+  "permissions": [
+    "storage",
+    "sidePanel",
+    "scripting"
   ],
-  "side_panel":{"default_path":"panel/index.html"},
-  "options_page":"options/index.html",
-  "action":{"default_title":"Open Stagehand"},
-  "commands":{"toggle-talk":{"suggested_key":{"default":"Ctrl+Shift+9"},"global":true,"description":"Toggle Stagehand push-to-talk"}}
+  "host_permissions": [
+    "https://*.forge-vtt.com/*",
+    "https://api.anthropic.com/*"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "worker/index.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.forge-vtt.com/*"
+      ],
+      "js": [
+        "main-world/index.js"
+      ],
+      "world": "MAIN",
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://*.forge-vtt.com/*"
+      ],
+      "js": [
+        "content/bridge.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "side_panel": {
+    "default_path": "panel/index.html"
+  },
+  "options_page": "options/index.html",
+  "action": {
+    "default_title": "Open Stagehand"
+  },
+  "commands": {
+    "toggle-talk": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+9"
+      },
+      "global": true,
+      "description": "Toggle Stagehand push-to-talk"
+    }
+  }
 }

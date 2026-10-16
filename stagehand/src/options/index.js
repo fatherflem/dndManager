@@ -1,5 +1,5 @@
 const $=id=>document.getElementById(id);
-async function send(msg){const r=await chrome.runtime.sendMessage(msg);if(!r?.ok)throw new Error(r?.error??'Worker unavailable.');return r.data;}
+async function send(msg){const r=await chrome.runtime.sendMessage(msg);if(!r?.ok)throw new Error(r?.error??'Worker unavailable.');if(msg.type==='get'&&!r.data)throw new Error('Stagehand returned no settings. Reload the extension and reopen Options.');return r.data;}
 async function task(fn){try{$('message').textContent='';await fn();}catch(error){$('message').textContent=error.message;}}
 function voices(){const selected=$('voice').value;$('voice').replaceChildren(new Option('Default',''));for(const v of speechSynthesis.getVoices())$('voice').append(new Option(`${v.name} (${v.lang})`,v.voiceURI));$('voice').value=selected;}
 speechSynthesis.onvoiceschanged=voices;voices();

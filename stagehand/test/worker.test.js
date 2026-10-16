@@ -80,3 +80,12 @@ test('concurrent handlers preserve independent state and view patches',{timeout:
     assert.equal(f.data.view.connected,true);assert.equal(f.data.view.tabId,7);
   }finally{f.restore();}
 });
+test('Options opened in a tab can load and save settings',{timeout:2000},async()=>{
+  const f=await fixture();
+  try{
+    const sender={id:'test-extension',tab:{id:99},url:'chrome-extension://test-extension/options/index.html'};
+    const loaded=await f.send({type:'get'},sender);assert.equal(loaded.ok,true);assert.ok(loaded.data.options);
+    const saved=await f.send({type:'digest',text:'New digest'},sender);assert.equal(saved.ok,true);assert.equal(f.data.digest,'New digest');
+    assert.equal(f.data.view.tabId,7);
+  }finally{f.restore();}
+});
