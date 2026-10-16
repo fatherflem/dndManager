@@ -1,13 +1,14 @@
 {
   "manifest_version": 3,
   "name": "Stagehand",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "minimum_chrome_version": "120",
   "description": "Voice and manual cues for a Foundry game master.",
   "permissions": [
     "storage",
     "sidePanel",
-    "scripting"
+    "scripting",
+    "clipboardWrite"
   ],
   "host_permissions": [
     "https://*.forge-vtt.com/*",

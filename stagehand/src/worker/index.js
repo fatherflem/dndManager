@@ -1,11 +1,17 @@
-import {load,save,mutate,publicData} from './storage.js';
+import {load,save,mutate,observeView,publicData} from './storage.js';
 import {lookup} from './claude.js';
 import {routeAlternatives} from '../shared/grammar.js';
 import {substitute,bandFor} from '../shared/dice.js';
 import {parseSheet} from '../shared/cuesheet.js';
+import {createLogger} from './log.js';
+const workerSid=crypto.randomUUID();
+const logger=createLogger({storage:chrome.storage.local});
+const log=(ev,details={},sender)=>logger.record({src:'worker',sid:sender?.sid??workerSid,tab:sender?.tab?.id??null,ev},details);
+log('worker-start');
+observeView((before,after)=>{for(const key of ['tabId','connected'])if(before[key]!==after[key])log('view-change',{name:key,from:before[key]??null,to:after[key]??null,tabId:after.tabId??null});});
 const trustedUI=sender=>sender.id===chrome.runtime.id&&[chrome.runtime.getURL('panel/index.html'),chrome.runtime.getURL('options/index.html')].includes(sender.url);
 const trustedOptions=sender=>trustedUI(sender)&&sender.url===chrome.runtime.getURL('options/index.html');
-async function page(tabId,payload){if(!Number.isInteger(tabId))throw new Error('No GM Foundry tab connected.');await chrome.tabs.sendMessage(tabId,{target:'page',...payload});}
+async function page(tabId,payload){try{if(!Number.isInteger(tabId))throw new Error('No GM Foundry tab connected.');await chrome.tabs.sendMessage(tabId,{target:'page',...payload});}catch(error){log('page-send-fail',{tabId,type:payload.type,error:error.message});throw error;}}
 async function updateView(patch){await save({view:patch});}
 let pendingLookup;
 async function runLookup(question,data,onResult,onError){
@@ -51,14 +57,33 @@ async function execute(command,data){
 }
 async function rollbackCue(cueId){if(cueId)await mutate(data=>({patch:data.view.navigationCue===cueId?{view:{...data.view,navigationCue:data.view.currentCue??null}}:undefined}));}
 async function handle(msg,sender){
-  const data=await load();
+  const data=await load();logger.setSecrets(data.apiKey,data.digest);
+  const kind=trustedUI(sender)?(trustedOptions(sender)?'options':'panel'):'page';
+  const incoming={kind,type:msg.type,tabId:sender.tab?.id??null};
+  const drop=reason=>{log('message',{...incoming,dropped:true,reason},sender);};
+  const accept=()=>log('message',{...incoming,dropped:false},sender);
   if(sender.tab&&!String(sender.url).startsWith(chrome.runtime.getURL(''))){
-    let origin;try{origin=new URL(sender.url).origin;}catch{return;}
-    if(sender.id!==chrome.runtime.id||!(new URL(origin).hostname.endsWith('.forge-vtt.com')||data.options.extraOrigins.includes(origin)))return;
-    if(msg.type==='ready'){if(!msg.isGM)return;await updateView({connected:true,tabId:sender.tab.id,status:'idle',adapter:msg.adapter,sceneErrors:msg.sceneErrors??[]});return{type:'configure',options:data.options,sheet:data.sheet};}
-    if(data.view.tabId!==sender.tab.id)return;
+    let origin;try{origin=new URL(sender.url).origin;}catch{drop('invalid-origin');return;}
+    if(sender.id!==chrome.runtime.id||!(new URL(origin).hostname.endsWith('.forge-vtt.com')&&new URL(origin).protocol==='https:'||data.options.extraOrigins.includes(origin))){drop('wrong-origin');return;}
+    if(!['log','ready','ping','transcript','live','status','result'].includes(msg.type)){drop('unknown-type');return;}
+    if(msg.type==='log'){accept();logger.record({src:'page',sid:msg.sid,tab:sender.tab.id,ev:msg.ev},msg.details);return;}
+    if(msg.type==='ready'){
+      if(!msg.isGM){drop('not-gm');return;}
+      const ownership=await mutate(current=>{
+        const startedAt=Number.isFinite(msg.startedAt)?msg.startedAt:Date.now();
+        if(current.view.connected&&current.view.tabId!==sender.tab.id&&(current.view.ownerStartedAt??0)>startedAt)return{result:{accepted:false,epoch:current.view.ownerEpoch??0}};
+        return{patch:{view:{...current.view,connected:true,tabId:sender.tab.id,ownerSid:msg.sid??null,ownerStartedAt:startedAt,ownerEpoch:(current.view.ownerEpoch??0)+(current.view.tabId!==sender.tab.id||current.view.ownerSid!==msg.sid?1:0),status:'idle',adapter:msg.adapter,sceneErrors:msg.sceneErrors??[]}},result:{accepted:true,previousTab:current.view.tabId,epoch:(current.view.ownerEpoch??0)+(current.view.tabId!==sender.tab.id||current.view.ownerSid!==msg.sid?1:0)}};
+      });
+      if(!ownership.accepted){drop('newer-tab');return{type:'deactivate',reason:'newer-tab',epoch:ownership.epoch};}
+      accept();
+      if(Number.isInteger(ownership.previousTab)&&ownership.previousTab!==sender.tab.id){pendingLookup?.controller.abort();pendingLookup=undefined;log('tab-takeover',{from:ownership.previousTab,to:sender.tab.id},sender);void page(ownership.previousTab,{type:'deactivate',reason:'newer-tab',epoch:ownership.epoch}).catch(()=>{});}
+      return{type:'configure',epoch:ownership.epoch,options:data.options,sheet:data.sheet};
+    }
+    if(data.view.tabId!==sender.tab.id){drop('tab-id-mismatch');return msg.type==='ping'||msg.type==='transcript'?{type:'deactivate',reason:'newer-tab',epoch:data.view.ownerEpoch??0}:undefined;}
+    if(data.view.ownerSid&&msg.sid!==data.view.ownerSid){drop('session-mismatch');return;}
+    accept();
     if(msg.type==='ping')return{type:'heartbeat'};
-    if(msg.type==='transcript'){if(msg.cueId){const cue=data.sheet.cues.find(c=>c.id===msg.cueId);if(cue)await execute({type:'cue',cue},data);}else{await updateView({heard:msg.alternatives?.[0]??''});await execute(routeAlternatives(msg.alternatives??[],data.sheet,data.options.threshold),await load());}}
+    if(msg.type==='transcript'){if(msg.cueId){const cue=data.sheet.cues.find(c=>c.id===msg.cueId);if(cue){log('route',{type:'cue',cueId:cue.id,score:1},sender);await execute({type:'cue',cue},data);}}else{await updateView({heard:msg.alternatives?.[0]??''});await execute(routeAlternatives(msg.alternatives??[],data.sheet,data.options.threshold,details=>log('route',details,sender)),await load());}}
     if(msg.type==='live')await updateView({heard:msg.text});
     if(msg.type==='status')await updateView({status:msg.status,...(msg.mic!==undefined?{mic:msg.mic}:{}),...(msg.error?{did:msg.error}:{}),...(msg.connected===false?{connected:false}:{}),...(Array.isArray(msg.sceneErrors)?{sceneErrors:msg.sceneErrors}:{})});
     if(msg.type==='result'){
@@ -69,22 +94,29 @@ async function handle(msg,sender){
     }
     return;
   }
-  if(!trustedUI(sender))throw new Error('Untrusted extension message.');
+  if(!trustedUI(sender)){drop('untrusted');throw new Error('Untrusted extension message.');}
+  if(!['log','getLog','clearLog','get','manual','set','sheet','digest','options','testLookup','testVoice'].includes(msg.type)){drop('unknown-type');return;}
+  if(!trustedOptions(sender)&&['clearLog','sheet','digest','options','testLookup','testVoice'].includes(msg.type)){drop('options-required');throw new Error('Options page required.');}
+  accept();
+  if(msg.type==='log'){logger.record({src:kind,sid:msg.sid,tab:sender.tab?.id??null,ev:msg.ev},msg.details);return;}
+  if(msg.type==='getLog')return await logger.flush();
+  if(msg.type==='clearLog'){if(!trustedOptions(sender))throw new Error('Options page required.');await logger.clear();return{ok:true};}
   if(msg.type==='get')return publicData(data);
   if(msg.type==='manual'){
     if(msg.cueId){const cue=data.sheet.cues.find(c=>c.id===msg.cueId);if(!cue)throw new Error('Unknown cue.');await execute({type:'cue',cue},data);}
     else if(msg.handoutId){const handout=data.sheet.handouts?.find(c=>c.id===msg.handoutId);if(!handout)throw new Error('Unknown handout.');await execute({type:'handout',handout},data);}
     else if(msg.rollId){const roll=data.sheet.named_rolls?.find(c=>c.id===msg.rollId);if(!roll)throw new Error('Unknown roll.');await execute({type:'named_roll',roll},data);}
-    else if(msg.text)await execute(routeAlternatives([msg.text],data.sheet,data.options.threshold),data);
+    else if(msg.text)await execute(routeAlternatives([msg.text],data.sheet,data.options.threshold,details=>log('route',details,sender)),data);
     else if(['next','previous','panic','stop_all','hide_handout','repeat'].includes(msg.command))await execute({type:msg.command},data);
     return;
   }
   if(msg.type==='set'){if(!(msg.key in (data.sheet.state??{}))||!Number.isFinite(msg.value))throw new Error('Invalid state.');await execute({type:'set',key:msg.key,value:msg.value},data);return;}
   if(!trustedOptions(sender))throw new Error('Options page required.');
   if(msg.type==='sheet'){const sheet=parseSheet(msg.text);await mutate(current=>({patch:{sheet,state:{...sheet.state},view:{...current.view,currentCue:null,navigationCue:null}}}));if(data.view.tabId)await page(data.view.tabId,{type:'configure',options:data.options,sheet});return{ok:true};}
-  if(msg.type==='digest'){await save({digest:msg.text});return{ok:true};}
+  if(msg.type==='digest'){logger.setSecrets(msg.text);await save({digest:msg.text});return{ok:true};}
   if(msg.type==='options'){
     const options={...data.options,...msg.options};if(!Number.isFinite(options.threshold)||options.threshold<0||options.threshold>1||!Number.isFinite(options.rate)||options.rate<.1||options.rate>10)throw new Error('Invalid threshold or voice rate.');
+    logger.setSecrets(msg.apiKey);
     await save({options,...(msg.apiKey?{apiKey:msg.apiKey}:{})});
     const old=await chrome.scripting.getRegisteredContentScripts();if(old.length)await chrome.scripting.unregisterContentScripts({ids:old.map(s=>s.id)});
     if(options.extraOrigins.length)await chrome.scripting.registerContentScripts([{id:'extra-main',matches:options.extraOrigins.map(o=>`${o}/*`),js:['main-world/index.js'],world:'MAIN',runAt:'document_idle'},{id:'extra-bridge',matches:options.extraOrigins.map(o=>`${o}/*`),js:['content/bridge.js'],runAt:'document_idle'}]);
@@ -97,9 +129,9 @@ let queue=Promise.resolve();
 chrome.runtime.onMessage.addListener((msg,sender,respond)=>{
   // Routing and all lookups run outside the configuration queue. Authentication
   // and fixed-command parsing still happen in handle before any action is sent.
-  const immediate=['ping','transcript','manual','set','testLookup'].includes(msg.type);
+  const immediate=['ping','transcript','manual','set','testLookup','log','getLog','clearLog'].includes(msg.type);
   const operation=immediate?handle(msg,sender):queue.then(()=>handle(msg,sender));if(!immediate)queue=operation.catch(()=>{});
-  operation.then(result=>respond({ok:true,data:result})).catch(async error=>{await updateView({status:'error',did:error.message});respond({ok:false,error:error.message});});return true;
+  operation.then(result=>respond({ok:true,data:result})).catch(async error=>{log('message-error',{type:msg.type,error:error.message},sender);await updateView({status:'error',did:error.message});respond({ok:false,error:error.message});});return true;
 });
 chrome.commands.onCommand.addListener(async command=>{if(command==='toggle-talk'){try{const data=await load();await page(data.view.tabId,{type:'toggle'});}catch(error){await updateView({status:'error',did:error.message});}}});
 chrome.tabs.onRemoved.addListener(async tabId=>{await mutate(data=>({patch:data.view.tabId===tabId?{view:{...data.view,connected:false,tabId:null,mic:false}}:undefined}));});

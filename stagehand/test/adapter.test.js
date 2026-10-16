@@ -33,3 +33,13 @@ test('rolls explicitly whisper only to the acting GM and use messageMode',async(
 test('missing selfroll visibility mode blocks chat creation',async()=>{const{adapter,config,calls}=setup();await adapter.enable();delete config.ChatMessage.modes.selfroll;await assert.rejects(adapter.roll('1d100'),/unavailable/);assert.equal(calls.length,1);});
 test('scene validation reports missing scene and black-scene names',async()=>{const{adapter}=setup();assert.deepEqual(await adapter.validateScenes({black_scene:'Black',cues:[{actions:[{type:'scene',name:'Missing'}]}]}),['Scene not found: Missing','Black scene not found: Black']);});
 test('pending cue waits can be cancelled by panic',async()=>{const{adapter}=setup();await adapter.enable();const controller=new AbortController();const waiting=adapter.runAction({type:'wait',ms:30000},{signal:controller.signal});controller.abort();await assert.rejects(waiting,{name:'AbortError'});});
+test('already-muted activation never overwrites the retained original volume with zero',async()=>{
+  const f=setup();const stored=new Map(),storage={getItem:key=>stored.get(key)??null,setItem:(key,value)=>stored.set(key,value),removeItem:key=>stored.delete(key)};
+  const first=createAdapter({getGame:()=>f.game,getStorage:()=>storage});
+  await first.enable();assert.equal(f.getVolume(),0);
+  const second=createAdapter({getGame:()=>f.game,getStorage:()=>storage});await second.enable();
+  // Even if the old page exits before its takeover notification arrives, it
+  // must not restore volume now owned by the second page.
+  await first.disable();assert.equal(f.getVolume(),0);
+  await second.disable();assert.equal(f.getVolume(),.65);
+});

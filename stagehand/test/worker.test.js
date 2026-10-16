@@ -7,7 +7,7 @@ async function fixture(){
   const requests=[],sent=[];
   const data={apiKey:'test-only',digest:'Rules',options:{extraOrigins:[]},sheet:{version:1,state:{},cues:[{id:'bath',label:'Bathhouse',voice:['bathhouse'],actions:[{type:'scene',name:'Bathhouse'}]}]},view:{tabId:7,connected:true},state:{}};
   const oldChrome=globalThis.chrome,oldFetch=globalThis.fetch;
-  globalThis.chrome={runtime:{id:'test-extension',getURL:p=>`chrome-extension://test-extension/${p}`,onMessage:{addListener:fn=>listener=fn}},storage:{local:{get:async()=>structuredClone(data),set:async patch=>Object.assign(data,structuredClone(patch)),setAccessLevel:async()=>{}}},tabs:{sendMessage:async(id,msg)=>sent.push({id,...msg}),onRemoved:{addListener(){}}},commands:{onCommand:{addListener(){}}},sidePanel:{setPanelBehavior:async()=>{}}};
+  globalThis.chrome={runtime:{id:'test-extension',getURL:p=>`chrome-extension://test-extension/${p}`,onMessage:{addListener:fn=>listener=fn}},storage:{local:{get:async()=>structuredClone(data),set:async patch=>Object.assign(data,structuredClone(patch)),setAccessLevel:async()=>{}}},tabs:{sendMessage:async(id,msg)=>sent.push({id,...msg}),onRemoved:{addListener(){}}},scripting:{getRegisteredContentScripts:async()=>[],registerContentScripts:async()=>{},unregisterContentScripts:async()=>{}},commands:{onCommand:{addListener(){}}},sidePanel:{setPanelBehavior:async()=>{}}};
   let started=deferred();
   globalThis.fetch=(_url,options)=>{const response=deferred();requests.push({options,response});started.resolve();return response.promise;};
   await import(`../src/worker/index.js?fixture=${++fixtureId}`);
@@ -87,5 +87,50 @@ test('Options opened in a tab can load and save settings',{timeout:2000},async()
     const loaded=await f.send({type:'get'},sender);assert.equal(loaded.ok,true);assert.ok(loaded.data.options);
     const saved=await f.send({type:'digest',text:'New digest'},sender);assert.equal(saved.ok,true);assert.equal(f.data.digest,'New digest');
     assert.equal(f.data.view.tabId,7);
+  }finally{f.restore();}
+});
+test('newest Forge session takes over and older sessions cannot reclaim it',{timeout:2000},async()=>{
+  const f=await fixture();
+  try{
+    await f.send({type:'ready',isGM:true,sid:'old',startedAt:1000});
+    const newer={...f.page,tab:{id:8}};
+    const response=await f.send({type:'ready',isGM:true,sid:'new',startedAt:2000},newer);
+    assert.equal(response.data.type,'configure');assert.equal(f.data.view.tabId,8);
+    assert.ok(f.sent.some(m=>m.id===7&&m.type==='deactivate'&&m.reason==='newer-tab'));
+    const rejected=await f.send({type:'ready',isGM:true,sid:'old',startedAt:1000});
+    assert.equal(rejected.data.type,'deactivate');assert.equal(f.data.view.tabId,8);
+    const actions=f.sent.filter(m=>m.type==='execute').length;
+    await f.send({type:'transcript',sid:'old',cueId:'bath'});
+    assert.equal(f.sent.filter(m=>m.type==='execute').length,actions);
+    await f.send({type:'transcript',sid:'new',cueId:'bath'},newer);
+    assert.equal(f.sent.filter(m=>m.type==='execute').length,actions+1);
+    const entries=(await f.send({type:'getLog'},f.panel)).data;
+    assert.ok(entries.some(e=>e.ev==='tab-takeover'&&e.from===7&&e.to===8));
+    assert.ok(entries.some(e=>e.ev==='message'&&e.dropped&&e.reason==='newer-tab'));
+  }finally{f.restore();}
+});
+test('worker logs drops, routing scores, view transitions and page session ids',{timeout:2000},async()=>{
+  const f=await fixture();
+  try{
+    await f.send({type:'ready',isGM:true,sid:'page-session',startedAt:1000});
+    await f.send({type:'log',sid:'page-session',ev:'visibility',details:{visibility:'hidden',apiKey:'must-not-log',body:'must-not-log'}});
+    await f.send({type:'transcript',sid:'page-session',alternatives:['scene bath house']});
+    await f.send({type:'ping'}, {...f.page,url:'https://untrusted.example/'});
+    const entries=(await f.send({type:'getLog'},f.panel)).data;
+    assert.ok(entries.some(e=>e.ev==='worker-start'));
+    assert.ok(entries.some(e=>e.src==='page'&&e.sid==='page-session'&&e.ev==='visibility'&&e.tab===7));
+    assert.ok(entries.some(e=>e.ev==='route'&&e.cueId==='bath'&&e.score>=.82&&e.score<1));
+    assert.ok(entries.some(e=>e.ev==='message'&&e.dropped&&e.reason==='wrong-origin'));
+    assert.equal(JSON.stringify(entries).includes('must-not-log'),false);
+  }finally{f.restore();}
+});
+test('Options tab can save API settings and clear the event log',{timeout:2000},async()=>{
+  const f=await fixture();
+  try{
+    const sender={id:'test-extension',tab:{id:99},url:'chrome-extension://test-extension/options/index.html'};
+    const result=await f.send({type:'options',options:{lang:'fr-FR',threshold:.82,rate:1,extraOrigins:[]},apiKey:'private-key-for-test'},sender);
+    assert.equal(result.ok,true);assert.equal(f.data.options.lang,'fr-FR');assert.equal(f.data.apiKey,'private-key-for-test');
+    const entries=(await f.send({type:'getLog'},sender)).data;assert.equal(JSON.stringify(entries).includes('private-key-for-test'),false);
+    assert.equal((await f.send({type:'clearLog'},sender)).ok,true);assert.deepEqual(f.data.log,[]);
   }finally{f.restore();}
 });

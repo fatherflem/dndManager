@@ -1,7 +1,8 @@
 import {normalize} from './normalize.js';
 import {parseDice} from './dice.js';
-import {match} from './match.js';
-export function route(text,sheet,threshold=.82) {
+import {matchWithScore} from './match.js';
+export function route(text,sheet,threshold=.82,onMatch=()=>{}) {
+  const match=(...args)=>{const result=matchWithScore(...args);onMatch(result);return result.item;};
   const s=normalize(text),cues=sheet.cues??[];
   const simple={'next scene':'next','previous scene':'previous','kill audio':'stop_all','stop music':'stop_all',silence:'stop_all',panic:'panic',repeat:'repeat','hide handout':'hide_handout'};
   if(simple[s])return {type:simple[s]};
@@ -14,4 +15,13 @@ export function route(text,sheet,threshold=.82) {
   else {const cue=match(s,sceneCues,threshold);if(cue)return{type:'cue',cue};}
   return null;
 }
-export function routeAlternatives(alternatives,sheet,threshold){for(const text of alternatives){const command=route(text,sheet,threshold);if(command)return command;}return{type:'lookup',question:alternatives[0]??''};}
+export function routeAlternatives(alternatives,sheet,threshold,report=()=>{}){
+  let best=0,secondScore=0;
+  for(const [alternative,text]of alternatives.entries()){
+    let matched;
+    const command=route(text,sheet,threshold,result=>{if(result.score>best){best=result.score;secondScore=result.secondScore;}if(result.item)matched=result;});
+    if(command){report({type:command.type,score:matched?.score??1,secondScore:matched?.secondScore??0,cueId:command.cue?.id,alternative,transcript:text});return command;}
+  }
+  report({type:'lookup',score:best,secondScore,transcript:alternatives[0]??''});
+  return{type:'lookup',question:alternatives[0]??''};
+}
