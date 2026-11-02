@@ -134,3 +134,85 @@ test('Options tab can save API settings and clear the event log',{timeout:2000},
     assert.equal((await f.send({type:'clearLog'},sender)).ok,true);assert.deepEqual(f.data.log,[]);
   }finally{f.restore();}
 });
+
+test('filler transcripts never call Claude and meaningful unmatched speech still does',{timeout:2000},async()=>{
+  const f=await fixture();
+  try{
+    for(const text of ['', ' ', 'x', '.', ' THE ', 'a','an','uh','um','er','hmm','and','so']){
+      assert.equal((await f.send({type:'transcript',alternatives:[text]})).ok,true);
+      assert.equal(f.requests.length,0);assert.equal(f.data.view.did,"Didn't catch that");assert.equal(f.sent.at(-1).text,"Didn't catch that");
+    }
+    await f.send({type:'transcript',alternatives:[]});assert.equal(f.requests.length,0);
+    const entries=(await f.send({type:'getLog'},f.panel)).data;
+    for(const reason of ['empty-transcript','single-character','filler-word'])assert.ok(entries.some(e=>e.ev==='route'&&e.dropped&&e.reason===reason));
+    const pending=f.send({type:'transcript',alternatives:['what is cover']});await f.started();assert.equal(f.requests.length,1);
+    f.answer(0,'Cover rules. [Rules]');await pending;
+    const logs=(await f.send({type:'getLog'},f.panel)).data;assert.ok(logs.some(e=>e.ev==='lookup'&&e.ok&&Number.isFinite(e.duration)&&e.duration>=0));
+  }finally{f.restore();}
+});
+test('a meaningful recognition alternative remains usable after filler',{timeout:2000},async()=>{
+  const f=await fixture();try{
+    await f.send({type:'transcript',alternatives:['uh','bathhouse']});assert.equal(f.requests.length,0);assert.equal(f.sent.at(-1).command.cueId,'bath');
+  }finally{f.restore();}
+});
+test('lookup failures and timeouts persist duration without request secrets',{timeout:2000},async()=>{
+  const f=await fixture();try{
+    for(const name of ['Error','TimeoutError']){
+      f.nextRequest();const pending=f.send({type:'transcript',alternatives:['how does cover work']});await f.started();
+      f.requests.at(-1).response.resolve({ok:true,json:async()=>{throw new DOMException('mock failure',name);}});await pending;
+    }
+    const logs=(await f.send({type:'getLog'},f.panel)).data.filter(e=>e.ev==='lookup');
+    assert.equal(logs.length,2);assert.deepEqual(logs.map(e=>e.error),['Error','TimeoutError']);
+    assert.ok(logs.every(e=>e.ok===false&&Number.isFinite(e.duration)&&e.duration>=0));
+    for(const text of [f.data.apiKey,f.data.digest,'x-api-key','max_tokens'])assert.equal(JSON.stringify(logs).includes(text),false);
+  }finally{f.restore();}
+});
+test('hotkey handouts and initiative reach the page action handler',{timeout:2000},async()=>{
+  const f=await fixture();try{
+    f.data.sheet.handouts=[{id:'portrait',voice:['portrait'],src:'portrait.webp'}];
+    await f.send({type:'transcript',cueId:'portrait'});
+    assert.deepEqual(f.sent.at(-1).command.actions,[{type:'handout',id:'portrait',voice:['portrait'],src:'portrait.webp'}]);
+    await f.send({type:'transcript',alternatives:['initiative for the fighter twelve']});
+    assert.deepEqual(f.sent.at(-1).command.actions,[{type:'initiative',who:'the fighter',value:12}]);assert.equal(f.sent.at(-1).command.label,'the fighter 12');
+  }finally{f.restore();}
+});
+test('nav false cues leave the reserved pointer and next/previous skip them',{timeout:2000},async()=>{
+  const f=await fixture();try{
+    f.data.sheet.cues.push({id:'handout-scene',nav:false,voice:['handout scene'],actions:[{type:'scene',name:'Handout'}]},{id:'next',voice:['next'],actions:[{type:'scene',name:'Next'}]});
+    f.data.view.currentCue='bath';f.data.view.navigationCue='bath';
+    await f.send({type:'transcript',cueId:'handout-scene'});assert.equal(f.data.view.navigationCue,'bath');
+    await f.send({type:'result',cueId:'handout-scene',spoken:'Handout'});assert.equal(f.data.view.navigationCue,'bath');
+    await f.send({type:'transcript',alternatives:['next scene']});assert.equal(f.sent.at(-1).command.cueId,'next');
+    await f.send({type:'transcript',alternatives:['previous scene']});assert.equal(f.sent.at(-1).command.cueId,'bath');
+  }finally{f.restore();}
+});
+test('pattern scope is attached to every macro action without changing other actions or saved sheet',{timeout:2000},async()=>{
+  const f=await fixture();try{
+    const actions=[{type:'macro',name:'Timer Set'},{type:'scene',name:'Bathhouse'},{type:'macro',name:'Timer Announce'}];
+    f.data.sheet.cues.push({id:'timer',pattern:'^(?:set )?timer (?<minutes>\\d+) minutes?$',actions});
+    for(const text of ['timer 5 minutes','set timer five minutes']){
+      await f.send({type:'transcript',alternatives:[text]});
+      assert.deepEqual(f.sent.at(-1).command.actions,[{...actions[0],scope:{minutes:5}},actions[1],{...actions[2],scope:{minutes:5}}]);
+      assert.deepEqual(f.data.sheet.cues.at(-1).actions,actions);
+    }
+    // A hotkey invocation must not inherit captures from the previous voice command.
+    await f.send({type:'transcript',cueId:'timer'});assert.deepEqual(f.sent.at(-1).command.actions,actions);
+  }finally{f.restore();}
+});
+
+test('timer speech reaches the real runtime and adapter macro execute with numeric scope',{timeout:2000},async()=>{
+  const f=await fixture();const {createAdapter}=await import('../src/main-world/foundryAdapter.js');const {startStagehand}=await import('../src/main-world/runtime.js');
+  const scopes=[];const game={version:'14.368',user:{id:'gm',isGM:true},settings:{settings:new Map([['core.globalPlaylistVolume',{scope:'client'}]]),get:()=>.5,set:async()=>{}},macros:{getName:name=>name==='Timer Set'?{execute:async scope=>scopes.push(scope)}:null}};
+  const adapter=createAdapter({getGame:()=>game,getStorage:()=>undefined});
+  const win={location:{origin:'https://game.forge-vtt.com'},game,addEventListener(){},removeEventListener(){},postMessage(){}};
+  const runtime=startStagehand({win,doc:{addEventListener(){},visibilityState:'visible'},adapter,speak(){},configureTTS(){},setPoll:()=>1,clearPoll(){}});
+  const receive=payload=>runtime.receive({source:win,origin:win.location.origin,data:{tag:'stagehand-v1',direction:'to-page',payload}});
+  try{
+    f.data.sheet.cues=[{id:'timer',pattern:'^(?:set )?timer (?<minutes>\\d+)(?: minutes?)?$',actions:[{type:'macro',name:'Timer Set'}]}];
+    await receive({type:'configure',options:{pttKey:'F13'},sheet:f.data.sheet});
+    for(const text of ['timer 5 minutes','set timer five minutes']){
+      await f.send({type:'transcript',alternatives:[text]});await receive(f.sent.at(-1));
+    }
+    assert.deepEqual(scopes,[{minutes:5},{minutes:5}]);
+  }finally{await runtime.shutdown();f.restore();}
+});

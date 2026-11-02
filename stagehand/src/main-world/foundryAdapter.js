@@ -35,6 +35,26 @@ export function createAdapter({getGame=()=>globalThis.game,getFoundry=()=>global
     switch(action.type){
       case 'scene':{const scene=find(game.scenes,action,'Scene');if(scene.active)return{already:true};await scene.activate();return{};}
       case 'playlist':await find(game.playlists,action,'Playlist').playAll();return{};
+      case 'music':{
+        const playlist=find(game.playlists,action,'Playlist');
+        if(playlist.playing)return{};
+        await Promise.all([...game.playlists.playing].filter(p=>p.id!==playlist.id).map(p=>p.stopAll()));
+        await playlist.playAll();return{};
+      }
+      case 'macro':{
+        const macro=find(game.macros,action,'Macro');
+        if(action.scope===undefined)await macro.execute();else await macro.execute(action.scope);
+        return{};
+      }
+      case 'initiative':{
+        const combat=game.combat;if(!combat)throw new Error('No fight running.');
+        const who=String(action.who).trim().toLowerCase().replace(/^the /,'');
+        const all=[...combat.combatants],tiers=[n=>n===who,n=>n.startsWith(who),n=>n.includes(who)];
+        let hits=[];
+        for(const test of tiers){hits=all.filter(c=>test(String(c.name??'').toLowerCase()));if(hits.length)break;}
+        if(hits.length!==1)throw new Error(hits.length?`More than one combatant matches "${action.who}".`:`No combatant named "${action.who}".`);
+        await combat.setInitiative(hits[0].id,action.value);return{};
+      }
       case 'sound':{const playlist=find(game.playlists,{name:action.playlist,id:action.playlistId},'Playlist');await playlist.playSound(find(playlist.sounds,action,'Track'));return{};}
       case 'stop_all':return stopAll();
       case 'oneshot':{
@@ -62,9 +82,9 @@ export function createAdapter({getGame=()=>globalThis.game,getFoundry=()=>global
   async function roll(formula){
     requireEnabled();const Roll=getFoundry().dice.Roll;
     if(!Roll.validate(formula))throw new Error('Not a roll.');
-    if(!getConfig()?.ChatMessage?.modes?.selfroll)throw new Error('Foundry selfroll message mode is unavailable.');
+    const modes=getConfig()?.ChatMessage?.modes??{},mode=['self','selfroll'].find(k=>k in modes);
     const result=await new Roll(formula).evaluate({allowInteractive:false});
-    await result.toMessage({flavor:'Stagehand',whisper:[getGame().user.id],blind:false},{messageMode:'selfroll'});
+    await result.toMessage({flavor:'Stagehand',whisper:[getGame().user.id],blind:false},mode?{messageMode:mode}:{});
     return{total:result.total,result:result.result};
   }
   async function validateScenes(sheet){

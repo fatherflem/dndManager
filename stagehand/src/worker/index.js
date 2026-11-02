@@ -18,7 +18,7 @@ async function runLookup(question,data,onResult,onError){
   pendingLookup?.controller.abort();
   const job={controller:new AbortController()};pendingLookup=job;
   try{
-    const result=await lookup(question,data,fetch,{signal:job.controller.signal});
+    const result=await lookup(question,data,fetch,{signal:job.controller.signal,onComplete:details=>log('lookup',details)});
     if(pendingLookup!==job)return;
     return onResult?await onResult(result):result;
   }catch(error){
@@ -30,6 +30,7 @@ async function runLookup(question,data,onResult,onError){
 async function execute(command,data){
   const tabId=data.view.tabId;
   if(command.type==='set'){await mutate(current=>{if(!(command.key in (current.sheet.state??{}))||!Number.isFinite(command.value))throw new Error('Invalid state.');return{patch:{state:{...current.state,[command.key]:command.value}}};});await page(tabId,{type:'speak',text:`${command.key.replaceAll('_',' ')} ${command.value}.`});await updateView({did:`Set ${command.key} to ${command.value}`});return;}
+  if(command.type==='dropped'){await updateView({status:'idle',did:"Didn't catch that"});await page(tabId,{type:'speak',text:"Didn't catch that"});return;}
   if(command.type==='lookup'){
     await updateView({status:'lookup',heard:command.question,did:'No cue matched.'});
     await runLookup(command.question,data,async result=>{await save({history:result.history,lastSpoken:result.spoken});await updateView({status:'idle',lookup:{question:command.question,answer:result.answer}});await page(tabId,{type:'speak',text:result.spoken});},async error=>{const text=error.name==='TimeoutError'?'Lookup timed out.':'Couldn’t look that up.';await updateView({status:'error',did:error.message});await page(tabId,{type:'speak',text});});return;
@@ -38,7 +39,7 @@ async function execute(command,data){
   if(command.type==='invalid_roll'){await page(tabId,{type:'speak',text:'Not a roll.'});await updateView({did:'Not a roll.'});return;}
   if(command.type==='next'||command.type==='previous'){
     const cue=await mutate(current=>{
-      const cues=current.sheet.cues.filter(c=>c.actions.some(a=>a.type==='scene'));
+      const cues=current.sheet.cues.filter(c=>c.nav!==false&&c.actions.some(a=>a.type==='scene'));
       const index=cues.findIndex(c=>c.id===(current.view.navigationCue??current.view.currentCue));
       const next=cues[command.type==='next'?index+1:index-1];
       return{patch:next?{view:{...current.view,navigationCue:next.id}}:undefined,result:next};
@@ -49,9 +50,10 @@ async function execute(command,data){
   if(command.type==='panic')command={type:'actions',actions:[{type:'stop_all'},{type:'scene',name:data.sheet.black_scene}],label:'Panic',urgent:true};
   if(command.type==='stop_all')command={type:'actions',actions:[{type:'stop_all'}],label:'Audio killed'};
   if(command.type==='handout')command={type:'actions',actions:[{type:'handout',...command.handout}],label:command.handout.id};
+  if(command.type==='initiative')command={type:'actions',actions:[{type:'initiative',who:command.who,value:command.value}],label:`${command.who} ${command.value}`};
   if(command.type==='cue'){
-    if(!command.reserved)await updateView({navigationCue:command.cue.id});
-    command={type:'actions',actions:command.cue.actions,label:command.cue.label??command.cue.id,cueId:command.cue.id};
+    if(!command.reserved&&command.cue.nav!==false)await updateView({navigationCue:command.cue.id});
+    command={type:'actions',actions:command.cue.actions.map(action=>action.type==='macro'&&command.scope!==undefined?{...action,scope:command.scope}:action),label:command.cue.label??command.cue.id,cueId:command.cue.id};
   }
   try{await page(tabId,{type:'execute',command});}catch(error){await rollbackCue(command.cueId);throw error;}
 }
@@ -83,7 +85,7 @@ async function handle(msg,sender){
     if(data.view.ownerSid&&msg.sid!==data.view.ownerSid){drop('session-mismatch');return;}
     accept();
     if(msg.type==='ping')return{type:'heartbeat'};
-    if(msg.type==='transcript'){if(msg.cueId){const cue=data.sheet.cues.find(c=>c.id===msg.cueId);if(cue){log('route',{type:'cue',cueId:cue.id,score:1},sender);await execute({type:'cue',cue},data);}}else{await updateView({heard:msg.alternatives?.[0]??''});await execute(routeAlternatives(msg.alternatives??[],data.sheet,data.options.threshold,details=>log('route',details,sender)),await load());}}
+    if(msg.type==='transcript'){if(msg.cueId){const cue=data.sheet.cues.find(c=>c.id===msg.cueId);const handout=cue?null:data.sheet.handouts?.find(c=>c.id===msg.cueId);if(cue){log('route',{type:'cue',cueId:cue.id,score:1},sender);await execute({type:'cue',cue},data);}else if(handout){log('route',{type:'handout',cueId:handout.id,score:1},sender);await execute({type:'handout',handout},data);}}else{await updateView({heard:msg.alternatives?.[0]??''});await execute(routeAlternatives(msg.alternatives??[],data.sheet,data.options.threshold,details=>log('route',details,sender)),await load());}}
     if(msg.type==='live')await updateView({heard:msg.text});
     if(msg.type==='status')await updateView({status:msg.status,...(msg.mic!==undefined?{mic:msg.mic}:{}),...(msg.error?{did:msg.error}:{}),...(msg.connected===false?{connected:false}:{}),...(Array.isArray(msg.sceneErrors)?{sceneErrors:msg.sceneErrors}:{})});
     if(msg.type==='result'){

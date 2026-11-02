@@ -1,7 +1,7 @@
 const small = Object.fromEntries('zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen'.split(' ').map((x,i)=>[x,i]));
 const tens = {twenty:20,thirty:30,forty:40,fifty:50,sixty:60,seventy:70,eighty:80,ninety:90};
 export function normalize(text) {
-  let words=String(text).toLowerCase().replace(/d[-\s]+(?=\d)/g,'d').replace(/[^a-z0-9@+\-\s]/g,' ').trim().split(/\s+/);
+  let words=String(text).toLowerCase().replace(/\bd[-\s]+(?=\d)/g,'d').replace(/[^a-z0-9@+\-\s]/g,' ').trim().split(/\s+/);
   const out=[];
   for(let i=0;i<words.length;i++) {
     if(words[i] in small || words[i] in tens) {

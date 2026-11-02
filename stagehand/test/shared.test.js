@@ -18,3 +18,62 @@ test('malformed cue sheets are reported',()=>{assert.throws(()=>parseSheet('vers
 test('fixed alternatives precede lookup',()=>{assert.equal(routeAlternatives(['what is this','next scene'],sheet).type,'next');assert.equal(routeAlternatives(['what is this','hello there'],sheet).question,'what is this');assert.equal(route('bath house',sheet).cue.id,'scene_19_bathhouse');});
 test('state updates use aliases',()=>{assert.deepEqual(route('set war within two',sheet),{type:'set',key:'war_within',value:2});assert.equal(route('set unknown two',sheet),null);});
 test('all fixed grammar verbs are routed',()=>{for(const [text,type]of [['panic','panic'],['repeat','repeat'],['silence','stop_all'],['hide handout','hide_handout'],['previous scene','previous'],['show harding','handout'],['music bathhouse','cue'],['roll junk','invalid_roll']])assert.equal(route(text,sheet)?.type,type,text);});
+
+const cue=(id,voice,actions=[{type:'macro',name:id}])=>({id,voice,actions});
+test('documented bare names route every cue and handout with one margin check',()=>{
+  const s={cues:[cue('scream',['scream']),cue('matron',['matron'],[{type:'oneshot',src:'x'}])],handouts:[{id:'portrait',voice:['portrait'],src:'x'}]};
+  assert.equal(route('scream',s).cue.id,'scream');assert.equal(route('matron',s).cue.id,'matron');assert.equal(route('portrait',s).handout.id,'portrait');
+  s.handouts.push({id:'other',voice:['scream'],src:'y'});assert.equal(route('scream',s),null);
+});
+test('music prefix accepts music actions and validation requires music/macro names',()=>{
+  const s={version:1,cues:[cue('track',['track'],[{type:'music',name:'Track'}])]};
+  assert.equal(route('music track',s).cue.id,'track');assert.deepEqual(validateSheet(s),[]);
+  for(const type of ['music','macro'])assert.match(validateSheet({version:1,cues:[cue('bad',['bad'],[{type}])]}).join(),new RegExp(`Missing ${type} name: bad`));
+});
+test('initiative parses both word orders, optional for, negative values and spoken numbers',()=>{
+  for(const text of ['initiative bard seventeen','initiative for bard 17','bard initiative 17'])assert.deepEqual(route(text,{cues:[]}),{type:'initiative',who:'bard',value:17});
+  assert.deepEqual(route('initiative for the Fighter minus two',{cues:[]}),{type:'initiative',who:'the fighter',value:-2});
+  assert.deepEqual(route('fighter initiative minus two',{cues:[]}),{type:'initiative',who:'fighter',value:-2});
+  assert.equal(normalize('bard 17'),'bard 17');assert.equal(route('initiative bard banana',{cues:[]}),null);
+});
+test('all leading command phrases retry only after the raw phrase misses',()=>{
+  const s={cues:[cue('crater',['the crater'])]};
+  for(const prefix of ['open','go to','switch to','cut to','show','bring up','pull up'])assert.equal(route(`${prefix} the crater`,s).cue.id,'crater',prefix);
+  const raw={cues:[cue('show',['show timer']),cue('timer',['timer'])]};
+  assert.equal(route('show timer',raw).cue.id,'show');
+});
+test('fallback preserves raw and stripped ambiguity safeguards',()=>{
+  const same=[cue('a',['the crater']),cue('b',['the crater'])];
+  assert.equal(route('open the crater',{cues:same}),null);
+  assert.equal(route('open something else',{cues:same}),null);
+  assert.equal(route('show timer',{cues:[cue('a',['show timer']),cue('b',['show timer']),cue('c',['timer'])]}),null);
+  assert.equal(route('open the crater',{cues:[cue('c',['the crater'])]},1).cue.id,'c');
+});
+const patternSheet={version:1,cues:[{id:'timer_set',label:'Set the timer',pattern:'^(?:set )?timer (?<minutes>\\d+)(?: minutes?)?$',actions:[{type:'macro',name:'Timer Set'}]}]};
+test('optional patterns accept both timer phrases without requiring voice aliases',()=>{
+  assert.deepEqual(validateSheet(patternSheet),[]);
+  for(const text of ['timer 5 minutes','set timer five minutes'])assert.deepEqual(route(text,patternSheet).scope,{minutes:5});
+  assert.equal(route('bath house',sheet).cue.id,'scene_19_bathhouse');
+});
+test('number words zero through sixty normalize before pattern matching',()=>{
+  const small='zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen'.split(' ');
+  const tens=['','','twenty','thirty','forty','fifty','sixty'];
+  for(let n=0;n<=60;n++){
+    const words=n<20?small[n]:tens[Math.floor(n/10)]+(n%10?' '+small[n%10]:'');
+    assert.equal(normalize(words),String(n));assert.deepEqual(route(`timer ${words} minutes`,patternSheet).scope,{minutes:n});
+  }
+});
+test('pattern captures convert digits only and retain other strings',()=>{
+  const s={cues:[{...patternSheet.cues[0],pattern:'^timer (?<minutes>\\d+) (?<target>[a-z]+)(?: (?<optional>later))?$'}]};
+  assert.deepEqual(route('timer 05 bard',s).scope,{minutes:5,target:'bard'});
+  const signed={cues:[{...patternSheet.cues[0],pattern:'^timer(?<amount>-\\d+)$'}]};
+  assert.deepEqual(route('timer -5',signed).scope,{amount:'-5'});
+});
+test('initiative precedes patterns and patterns precede bare-name matching',()=>{
+  const s={cues:[{...patternSheet.cues[0],pattern:'.*'},cue('bare',['timer 5 minutes'])]};
+  assert.equal(route('initiative bard 17',s).type,'initiative');assert.equal(route('timer 5 minutes',s).cue.id,'timer_set');
+});
+test('invalid and non-string regex errors identify their cue at load time',()=>{
+  for(const pattern of ['[',42])assert.match(validateSheet({version:1,cues:[{...patternSheet.cues[0],pattern}]}).join(),/Invalid pattern for cue timer_set/);
+  assert.throws(()=>parseSheet('version: 1\ncues:\n  - id: broken_timer\n    pattern: "["\n    actions: [{type: macro, name: Timer}]'),/Invalid pattern for cue broken_timer/);
+});
