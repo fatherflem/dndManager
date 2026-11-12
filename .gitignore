@@ -1,3 +1,4 @@
 node_modules/
 stagehand/dist/
 stagehand/artifacts/
+.claude/settings.local.json
